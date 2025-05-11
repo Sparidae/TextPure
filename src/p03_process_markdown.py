@@ -200,7 +200,7 @@ class LLMProcessor:
 
     async def clean_text_async(self, text: str) -> str:
         """
-        使用LLM异步清理文本
+        使用LLM异步清理文本中的符号和格式字符
 
         Args:
             text: 需要清理的原始文本
@@ -245,7 +245,7 @@ class LLMProcessor:
 
     async def extract_keywords_async(self, text: str) -> List[str]:
         """
-        从文本中提取关键词
+        从文本中提取并筛选关键词
 
         Args:
             text: 清理后的文本
@@ -275,13 +275,29 @@ class LLMProcessor:
                 all_keywords.update(keywords)
 
         # 筛选最重要的关键词
+        success = False
+        filtered_keywords = []
         if all_keywords:
             prompt = get_prompt("keywords_filtering", keywords=", ".join(all_keywords))
             success, result = await self._call_llm_async(prompt, temp=0.3)
-            if success:
-                return [kw.strip() for kw in result.split(",") if kw.strip()]
+            filtered_keywords = [kw.strip() for kw in result.split(",") if kw.strip()]
 
-        return list(all_keywords)
+        # 保存逻辑
+        if self.debug_save:
+            output_dir = "data/03_processed_text"
+            os.makedirs(output_dir, exist_ok=True)
+            keywords_file = os.path.join(output_dir, "3.2_keywords.txt")
+            with open(keywords_file, "w", encoding="utf-8") as f:
+                f.write("，".join(all_keywords))
+                f.write("\n\n"+"=" * 50 + "过滤后\n\n")
+                f.write("，".join(filtered_keywords))
+
+            print(f"已将所有关键词保存到 {keywords_file}")
+
+        if success:
+            return filtered_keywords
+        else:
+            return list(all_keywords)
 
     async def extract_content_for_keywords_async(
         self, text: str, keywords: List[str]
