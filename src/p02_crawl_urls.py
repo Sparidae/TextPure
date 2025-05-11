@@ -19,7 +19,7 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 browser_config = BrowserConfig(verbose=True, text_mode=True, light_mode=True)
 run_config = CrawlerRunConfig(
     # Content filtering
-    word_count_threshold=30,
+    word_count_threshold=1,
     excluded_tags=["form", "header"],
     exclude_external_links=True,
     # Content processing
@@ -203,4 +203,9 @@ async def crawl_urls(mode="batch", url=""):
 
 
 if __name__ == "__main__":
-    asyncio.run(crawl_urls(mode="batch"))
+    asyncio.run(
+        crawl_urls(
+            mode="single",
+            url="https://mzh.moegirl.org.cn/%E4%B8%B0%E5%B7%9D%E7%A5%A5%E5%AD%90",
+        )
+    )

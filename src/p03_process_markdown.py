@@ -1,7 +1,7 @@
 import asyncio
 import glob
 import os
-from typing import List, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -24,13 +24,15 @@ print(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 
-def estimate_token_length(text):
-    # 估计token长度
+def estimate_token_length(text: str) -> int:
+    """估计文本的token长度"""
     token_count = len(tokenizer(text)["input_ids"])
     return token_count
 
 
 class TextChunker:
+    """文本分块器，用于将长文本分割成适合模型处理的小块"""
+
     def __init__(self, text: str, max_tokens: int = 32000, reserve_tokens: int = 200):
         """
         初始化文本分块器
@@ -42,16 +44,11 @@ class TextChunker:
         """
         self.text = text
         # 使用更保守的上下文容量限制
-        self.max_tokens = int(max_tokens * 0.8) - reserve_tokens
+        self.max_tokens = max_tokens - reserve_tokens
         self.paragraphs = text.split("\n")
 
     def get_chunks(self) -> List[str]:
-        """
-        直接生成并返回所有文本块
-
-        Returns:
-            所有文本块的列表
-        """
+        """生成并返回所有文本块"""
         chunks = []
         current_chunk = []
         current_length = 0
@@ -89,9 +86,7 @@ class TextChunker:
         return chunks
 
     def _split_long_paragraph(self, paragraph: str) -> str:
-        """
-        分割超长段落并返回第一个可用的块
-        """
+        """分割超长段落并返回第一个可用的块"""
         sentences = paragraph.split(". ")
         chunk = []
         current_length = 0
@@ -117,113 +112,372 @@ class TextChunker:
         return " ".join(chunk)
 
 
-async def process_single_chunk_async(chunk, model, temperature) -> Tuple[bool, str]:
+class LLMProcessor:
+    """LLM处理器类，处理文本清理、关键词提取、内容组织等任务"""
+
+    def __init__(
+        self,
+        model: str = model_name,
+        max_tokens: int = context_length,
+        max_concurrent: int = 5,
+        temperature: float = 0.7,
+        use_openai_client: bool = False,
+    ):
+        """
+        初始化LLM处理器
+
+        Args:
+            model: 使用的模型名称
+            max_tokens: 模型最大上下文长度
+            max_concurrent: 最大并发请求数
+            temperature: 模型温度参数
+        """
+        self.debug_save = True  # 设定的中间环节保存部分
+        self.model = model
+        self.max_tokens = max_tokens
+        self.max_concurrent = max_concurrent
+        self.temperature = temperature
+        self.completion_func = get_completion(use_openai_client)
+
+    async def _call_llm_async(
+        self, prompt: str, temp: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """异步调用LLM模型"""
+        try:
+            temperature = temp if temp is not None else self.temperature
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self.completion_func(
+                    prompt, model=self.model, temperature=temperature
+                ),
+            )
+        except Exception as e:
+            print(f"LLM调用异常: {str(e)}")
+            return False, ""
+
+    async def _process_chunks_async(
+        self, chunks: List[str], process_func, desc: str
+    ) -> List[Tuple[int, Union[str, Set[str]]]]:
+        """
+        异步处理多个文本块
+
+        Args:
+            chunks: 文本块列表
+            process_func: 处理单个块的函数，该函数只接受一个chunk参数
+            desc: 进度条描述
+
+        Returns:
+            处理结果列表，每项包含索引和处理结果
+        """
+        results = []
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        async def process_with_semaphore(i, chunk):
+            async with semaphore:
+                print(f"处理第 {i + 1}/{len(chunks)} 个{desc}")
+                try:
+                    result = await process_func(chunk)
+                    return i, result
+                except Exception as e:
+                    print(f"处理第 {i + 1} 个{desc}时出错: {str(e)}")
+                    return i, None
+
+        # 创建异步任务列表
+        tasks = [process_with_semaphore(i, chunk) for i, chunk in enumerate(chunks)]
+
+        # 使用tqdm创建进度条
+        pbar = tqdm(total=len(chunks), desc=f"处理{desc}")
+
+        # 等待每个任务完成并更新进度条
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            pbar.update(1)
+
+        pbar.close()
+        return sorted(results, key=lambda x: x[0])  # 按索引排序
+
+    async def clean_text_async(self, text: str) -> str:
+        """
+        使用LLM异步清理文本
+
+        Args:
+            text: 需要清理的原始文本
+
+        Returns:
+            cleaned_text: 清理后的文本
+        """
+        # 针对raw文本分块
+        chunker = TextChunker(text, max_tokens=self.max_tokens)
+        chunks = chunker.get_chunks()
+
+        async def process_chunk(chunk):  # 特定功能函数 传递给 块处理函数
+            prompt = get_prompt("text_cleaning", text=chunk)
+            success, cleaned_chunk = await self._call_llm_async(prompt)
+            return cleaned_chunk if success else chunk
+
+        results = await self._process_chunks_async(chunks, process_chunk, "文本块")
+
+        ######### 将所有chunk的处理结果对比保存到一个文件中 #########
+        if self.debug_save:
+            output_dir = "data/03_processed_text"
+            os.makedirs(output_dir, exist_ok=True)
+            # 创建一个包含所有chunk的单一文件
+            chunks_file = os.path.join(output_dir, "all_chunks.txt")
+            with open(chunks_file, "w", encoding="utf-8") as f:
+                for i, (chunk, result) in enumerate(zip(chunks, results)):
+                    if result is not None:
+                        f.write(f"\n\n{'=' * 50}\n")
+                        f.write(f"Chunk {i + 1}\n\n{chunk}\n\n")
+                        f.write(f"{'-' * 50}\n\n")
+                        f.write(result[1])
+            # 创建包含所有清理后文本的文件
+            cleaned_file = os.path.join(output_dir, "3.1_cleaned_text.txt")
+            with open(cleaned_file, "w", encoding="utf-8") as f:
+                for _, result in results:
+                    if result is not None:
+                        f.write(result)
+            print(f"已将所有处理后的文本块保存到 {chunks_file}")
+            print(f"已将所有清理后的文本保存到 {cleaned_file}")
+
+        return "\n".join(result for _, result in results if result is not None)
+
+    async def extract_keywords_async(self, text: str) -> List[str]:
+        """
+        从文本中提取关键词
+
+        Args:
+            text: 清理后的文本
+
+        Returns:
+            keywords: 提取的关键词列表
+        """
+        # 针对清洗后的文本重新分块
+        chunker = TextChunker(text, max_tokens=self.max_tokens)
+        chunks = chunker.get_chunks()
+        all_keywords = set()
+
+        async def process_chunk(chunk):  # 提取关键词的特殊函数
+            prompt = get_prompt("keywords_extraction", text=chunk)
+            success, result = await self._call_llm_async(prompt, temp=0.3)
+            if success:
+                return {
+                    kw.strip() for kw in result.split(",") if kw.strip()
+                }  # 关注这一步分割关键词，可能会出问题，需要保留中途结果
+            return set()  # 失败返回空集
+
+        results = await self._process_chunks_async(chunks, process_chunk, "关键词提取")
+
+        # 合并所有关键词 集合
+        for _, keywords in results:
+            if keywords:
+                all_keywords.update(keywords)
+
+        # 筛选最重要的关键词
+        if all_keywords:
+            prompt = get_prompt("keywords_filtering", keywords=", ".join(all_keywords))
+            success, result = await self._call_llm_async(prompt, temp=0.3)
+            if success:
+                return [kw.strip() for kw in result.split(",") if kw.strip()]
+
+        return list(all_keywords)
+
+    async def extract_content_for_keywords_async(
+        self, text: str, keywords: List[str]
+    ) -> Dict[str, str]:
+        """
+        为关键词提取相关内容
+
+        Args:
+            text: 清理后的文本
+            keywords: 关键词列表
+
+        Returns:
+            keyword_contents: 关键词-内容字典
+        """
+        keyword_contents = {}
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        async def process_keyword(keyword):
+            async with semaphore:
+                print(f"抽取关键词内容: {keyword}")
+                return keyword, await self._extract_content_for_keyword(text, keyword)
+
+        # 创建异步任务列表
+        tasks = [process_keyword(keyword) for keyword in keywords]
+
+        # 使用tqdm创建进度条
+        pbar = tqdm(total=len(keywords), desc="抽取关键词内容")
+
+        # 等待每个任务完成并更新进度条
+        for coro in asyncio.as_completed(tasks):
+            keyword, content = await coro
+            if content:  # 只添加有内容的关键词
+                keyword_contents[keyword] = content
+            pbar.update(1)
+
+        pbar.close()
+        return keyword_contents
+
+    async def _extract_content_for_keyword(self, text: str, keyword: str) -> str:
+        """为单个关键词从所有文本块中提取并整合相关内容"""
+        try:
+            chunker = TextChunker(text, max_tokens=self.max_tokens)
+            chunks = chunker.get_chunks()
+            related_segments = []  # 内容块
+
+            # 处理每个包含关键词的块
+            for chunk in chunks:
+                if keyword.lower() in chunk.lower():
+                    prompt = get_prompt("content_extraction", keyword=keyword, text=chunk)
+                    success, result = await self._call_llm_async(prompt, temp=0.3)
+                    if success and result.strip():
+                        related_segments.append(result.strip())
+
+            # 如果找到相关内容，将其整合为一个自然段
+            if related_segments:
+                prompt = get_prompt(
+                    "content_integration",
+                    keyword=keyword,
+                    segments=" ".join(related_segments),
+                )  # TODO 整合这一段有可能会超过上下文限制。
+                success, result = await self._call_llm_async(prompt, temp=0.3)
+                if success:
+                    return result.strip()
+
+            return ""
+        except Exception as e:
+            print(f"为关键词'{keyword}'提取内容时出错: {str(e)}")
+            return ""
+
+    async def process_text_async(
+        self, text: str
+    ) -> Dict[str, Union[str, List[str], Dict[str, str]]]:
+        """
+        处理文本的主要流程
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            result: 包含处理结果的字典
+        """
+        # 1. 清理文本
+        print("开始清理文本...")
+        cleaned_text = await self.clean_text_async(text)
+
+        # 2. 提取关键词
+        print("开始提取关键词...")
+        keywords = await self.extract_keywords_async(cleaned_text)
+
+        # 3. 根据关键词组织内容
+        print("开始组织内容...")
+        keyword_contents = await self.extract_content_for_keywords_async(
+            cleaned_text, keywords
+        )
+
+        # 返回处理结果
+        return {
+            "cleaned_text": cleaned_text,
+            "keywords": keywords,
+            "keyword_contents": keyword_contents,  # 直接使用原始的关键词内容
+        }
+
+    def process_text(self, text: str) -> Dict[str, Union[str, List[str], Dict[str, str]]]:
+        """同步处理文本（内部使用异步）"""
+        return asyncio.run(self.process_text_async(text))
+
+
+def save_result_to_file(
+    result: Dict[str, Union[str, List[str], Dict[str, str]]], output_path: str
+) -> None:
     """
-    异步处理单个文本块
+    将处理结果保存到文件
 
     Args:
-        chunk: 文本块
-        model: 使用的模型
-        temperature: 温度参数
-
-    Returns:
-        (success, cleaned_chunk): 处理是否成功及处理后的文本
+        result: 处理结果字典
+        output_path: 输出文件路径
     """
     try:
-        # 从prompts模块获取提示词
-        prompt = get_prompt("text_cleaning", text=chunk)
+        # 创建输出目录
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # 使用非阻塞方式执行
-        loop = asyncio.get_event_loop()
-        success, cleaned_chunk = await loop.run_in_executor(
-            None, lambda: get_completion()(prompt, model=model, temperature=temperature)
-        )
-        return success, cleaned_chunk
+        # 保存处理结果
+        with open(output_path, "w", encoding="utf-8") as file:
+            # 写入关键词
+            file.write("# 主要关键词\n\n")
+            file.write(", ".join(result["keywords"]))
+            file.write("\n\n")
+
+            # 写入每个关键词的内容
+            file.write("# 关键词内容\n\n")
+            for keyword, content in result["keyword_contents"].items():
+                file.write(f"## {keyword}\n\n")
+                file.write(f"{content}\n\n")
+
+            # 写入清理后的原始文本
+            file.write("# 清理后的原始文本\n\n")
+            file.write(result["cleaned_text"])
+
+        print(f"已保存处理结果到 {output_path}")
     except Exception as e:
-        print(f"LLM处理异常: {str(e)} (大小：{estimate_token_length(chunk)} tokens)")
-        return False, chunk
+        print(f"保存结果失败: {str(e)}")
 
 
-async def clean_text_with_llm_async(
-    text, model=model_name, temperature=0.7, max_tokens=32000, max_concurrent=10
-):
+def process(
+    text: Optional[str] = None,
+    file_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+    model: str = model_name,
+    max_tokens: int = context_length,
+    max_concurrent: int = 5,
+    temperature: float = 0.7,
+) -> Dict[str, Union[str, List[str], Dict[str, str]]]:
     """
-    使用LLM异步清理包含杂乱URL和字符的爬取文本
+    处理Markdown文本或文件的统一入口函数
 
     Args:
-        text: 需要清理的原始文本
-        model: 使用的LLM模型
-        temperature: 模型温度参数
+        text: 要处理的文本，如果为None则从file_path读取
+        file_path: 输入文件路径，与text二选一
+        output_path: 输出文件路径，如果不为None则将结果保存到文件
+        model: 使用的模型
         max_tokens: 模型最大上下文长度
         max_concurrent: 最大并发请求数
-
-    Returns:
-        cleaned_text: 清理后的文本
-    """
-    # 创建文本分块器并获取所有块
-    chunker = TextChunker(text, max_tokens=max_tokens)
-    chunks = chunker.get_chunks()
-    cleaned_chunks = [None] * len(chunks)
-
-    # 创建semaphore限制并发数
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def process_with_semaphore(i, chunk):
-        async with semaphore:
-            print(f"开始处理第 {i + 1}/{len(chunks)} 个文本块")
-            try:
-                success, cleaned_chunk = await process_single_chunk_async(
-                    chunk, model, temperature
-                )
-                if success:
-                    return i, cleaned_chunk
-                else:
-                    return i, chunk
-            except Exception as e:
-                print(f"处理第 {i + 1} 个文本块时出错: {str(e)}")
-                return i, chunk
-
-    # 创建异步任务列表
-    tasks = [process_with_semaphore(i, chunk) for i, chunk in enumerate(chunks)]
-
-    # 使用tqdm创建进度条
-    pbar = tqdm(total=len(chunks), desc="处理文本块")
-
-    # 等待每个任务完成并更新进度条
-    for coro in asyncio.as_completed(tasks):
-        i, cleaned_chunk = await coro
-        cleaned_chunks[i] = cleaned_chunk
-        pbar.update(1)
-
-    pbar.close()
-
-    # 合并所有清理后的文本片段
-    return "\n".join(chunk for chunk in cleaned_chunks if chunk is not None)
-
-
-def clean_text_with_llm(
-    text, model=model_name, temperature=0.7, max_tokens=32000, max_concurrent=5
-):
-    """
-    使用LLM清理包含杂乱URL和字符的爬取文本
-
-    Args:
-        text: 需要清理的原始文本
-        model: 使用的LLM模型
         temperature: 模型温度参数
-        max_tokens: 模型最大上下文长度
-        max_concurrent: 最大并发请求数
 
     Returns:
-        cleaned_text: 清理后的文本
+        result: 包含处理结果的字典
     """
-    # 使用异步方式处理
-    return asyncio.run(
-        clean_text_with_llm_async(text, model, temperature, max_tokens, max_concurrent)
-    )
+    # 检查输入
+    if text is None and file_path is None:
+        raise ValueError("必须提供text或file_path参数")
+
+    # 如果提供了文件路径，从文件读取文本
+    if text is None:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as file:
+                text = file.read()
+        except Exception as e:
+            raise Exception(f"读取文件 {file_path} 失败: {str(e)}")
+
+    # 创建处理器并处理文本
+    processor = LLMProcessor(model, max_tokens, max_concurrent, temperature)
+    result = processor.process_text(text)
+
+    # 如果提供了输出路径，保存结果
+    if output_path:
+        save_result_to_file(result, output_path)
+
+    return result
 
 
-def process_raw_markdown(mode, model=model_name, max_tokens=32000, max_concurrent=5):
+def process_raw_markdown(
+    mode: str,
+    model: str = model_name,
+    max_tokens: int = context_length,
+    max_concurrent: int = 5,
+) -> None:
     """
     处理指定模式下所有的raw_markdown文件
 
@@ -249,21 +503,14 @@ def process_raw_markdown(mode, model=model_name, max_tokens=32000, max_concurren
         print(f"处理文件: {file_path}")
 
         try:
-            # 读取文件内容
-            with open(file_path, "r", encoding="utf-8", errors="replace") as file:
-                content = file.read()
-
-            # 使用LLM清理文本
-            cleaned_content = clean_text_with_llm(
-                content, model=model, max_tokens=max_tokens, max_concurrent=max_concurrent
+            # 处理文件
+            process(
+                file_path=file_path,
+                output_path=output_path,
+                model=model,
+                max_tokens=max_tokens,
+                max_concurrent=max_concurrent,
             )
-
-            # 写入处理后的文件
-            with open(output_path, "w", encoding="utf-8") as file:
-                file.write(cleaned_content)
-
-            print(f"已保存清理后的文件: {output_path}")
-
         except Exception as e:
             print(f"处理文件 {file_path} 失败: {str(e)}")
 

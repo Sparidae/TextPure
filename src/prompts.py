@@ -1,4 +1,33 @@
-# 文本清理提示词（作为备份，优先使用YAML文件中的配置）
+def get_prompt(prompt_name, **kwargs):
+    """
+    获取指定名称的提示词，并填充参数
+
+    Args:
+        prompt_name: 提示词模板名称
+        **kwargs: 提示词中需要替换的参数
+
+    Returns:
+        填充参数后的提示词
+    """
+    code_prompts = {
+        "text_cleaning": TEXT_CLEANING_PROMPT,
+        "summary": SUMMARY_PROMPT,
+        "rag": RAG_PROMPT,
+        "keywords_extraction": KEYWORDS_EXTRACTION_PROMPT,
+        "keywords_filtering": KEYWORDS_FILTERING_PROMPT,
+        "content_extraction": CONTENT_EXTRACTION_PROMPT,
+        "content_integration": CONTENT_INTEGRATION_PROMPT,
+    }
+
+    if prompt_name not in code_prompts:
+        raise ValueError(f"未找到名为 '{prompt_name}' 的提示词模板")
+
+    prompt_template = code_prompts[prompt_name]
+
+    # 使用字符串format方法填充参数
+    return prompt_template.format(**kwargs)
+
+
 TEXT_CLEANING_PROMPT = """
 请帮我清理以下爬取的文本内容，去除以下内容：
 1. 所有URL链接，包括markdown链接元素
@@ -13,6 +42,16 @@ TEXT_CLEANING_PROMPT = """
 保持原始的markdown格式。
 严格去除 AI 生成的附加说明，仅保留清理后的核心数据。
 
+例如，对于以下需要清理的文本：
+```
+丰川祥子原是[月之森女子学园](https://mzh.moegirl.org.cn/%E6%9C%88%E4 "月之森女子学园")初三学生，丰川集团的千金，与[若叶睦](https://mzh.moegirl.org.cn/%E8%8B%A "若叶睦")、[长崎爽世](https://mzh.moegirl.org.cn/%E9%95%BF%E5%B4%8E%E7%88%BD%E4%B8%96 "长崎爽世")以及[Morfonica](https://mzh.moegirl.org.cn/Morfonica "Morfonica")五人是同校生，后来祥子转学到[羽丘女子学园](https://mzh.moegirl.org.cn/%E7%BE%BD%E4%B8%98%E5%A5%B3%E5%AD%90%E5%AD%A6%E5%9B%AD "羽丘女子学园")，现为高中一年级生。 
+```
+
+应该清理为：
+```
+丰川祥子原是月之森女子学园初三学生，丰川集团的千金，与若叶睦、长崎爽世以及Morfonica五人是同校生，后来祥子转学到羽丘女子学园，现为高中一年级生。 
+```
+
 以下是需要清理的文本:
 
 {text}
@@ -22,6 +61,16 @@ TEXT_CLEANING_PROMPT = """
 
 SUMMARY_PROMPT = """
 请帮我总结以下文本内容，提取出文本中的主要内容。
+
+例如，对于以下文本：
+```
+机器学习是人工智能的一个分支，它专注于开发能够从数据中学习并做出预测的算法。监督学习是机器学习中的一种主要方法，其中算法通过标记数据进行训练。无监督学习则不需要标记数据，而是寻找数据中的隐藏模式。强化学习是第三种主要方法，其中算法通过与环境交互并从反馈中学习。深度学习是机器学习的一个子集，它使用多层神经网络处理复杂任务，如图像识别和自然语言处理。
+```
+
+总结为：
+```
+机器学习是AI的分支，包括三种主要方法：通过标记数据训练的监督学习、寻找隐藏模式的无监督学习和通过环境反馈学习的强化学习。深度学习是使用多层神经网络的机器学习子集，适用于图像识别和自然语言处理等复杂任务。
+```
 
 以下是需要总结的文本:
 
@@ -38,6 +87,29 @@ RAG_PROMPT = """
 严格去除 AI 生成的附加说明，仅保留清理后的核心数据。
 请确保最终输出便于分块存储、向量化处理，并支持高效检索。
 
+例如，对于以下文本：
+```
+# 编程语言概述
+
+Python是一种高级编程语言，由Guido van Rossum于1991年创建，以其简洁易读的语法和丰富的库受到广泛欢迎。Python适用于网络开发、数据分析和人工智能等领域。
+
+Java是由Sun Microsystems（现为Oracle所有）开发的编程语言，于1995年发布。Java以"一次编写，到处运行"的特性著称，广泛应用于企业级应用和Android移动开发。
+
+JavaScript是一种主要用于网页开发的脚本语言，能够使网页具有交互性。它是几乎所有现代网站的核心技术之一，也可用于服务器端开发（Node.js）。
+```
+
+应该处理为：
+```
+## Python
+Python是一种高级编程语言，由Guido van Rossum于1991年创建，以其简洁易读的语法和丰富的库受到广泛欢迎。适用于网络开发、数据分析和人工智能等领域。
+
+## Java
+Java是由Sun Microsystems（现为Oracle所有）开发的编程语言，于1995年发布。以"一次编写，到处运行"的特性著称，广泛应用于企业级应用和Android移动开发。
+
+## JavaScript
+JavaScript是一种主要用于网页开发的脚本语言，能够使网页具有交互性。是几乎所有现代网站的核心技术之一，也可用于服务器端开发（Node.js）。
+```
+
 以下是需要处理的文本：
 
 {text}
@@ -45,28 +117,86 @@ RAG_PROMPT = """
 处理后的文本：
 """
 
+KEYWORDS_EXTRACTION_PROMPT = """
+请从以下文本中提取最重要的特指名词关键词（人物、概念等），返回一个逗号分隔的列表，不要重复，不要包含解释：
 
-def get_prompt(prompt_name, **kwargs):
-    """
-    获取指定名称的提示词，并填充参数
+例如，对于以下文本：
+```
+丰川祥子原是月之森女子学园初三学生，丰川集团的千金，与若叶睦、长崎爽世以及Morfonica五人是同校生，后来祥子转学到羽丘女子学园，现为高中一年级生。
+祥子是推动CRYCHIC组建的人，也是该乐队的键盘手。曾经的她个性温柔、天真烂漫，拥有天才的作曲能力，是才华横溢的少女。但却在某个雨天，以与往常截然不同的态度退出了CRYCHIC。退出CRYCHIC后，她主导组建了Ave Mujica，担任键盘手，还负责剧本和作曲。
+高一时，经常在学校音乐教室弹钢琴，也因此结识千早爱音，但她们都不是吹奏部成员。
+在Ave Mujica中的成员代号Oblivionis取自Lacus Oblivionis（忘湖），意指忘却。值得一提的是，组合内其他成员代号的月海和月湾均位于月球正面，仅忘湖位于月球背面。其演奏的优美旋律为乐队的声音增添了古典气息。隐藏在这些旋律中的情感是编织Ave Mujica独特世界的关键。
+从CRYCHIC时期使用至今的键盘为罗兰V-Combo VR-730，在Ave Mujica表演时增加了一把罗兰Fantom-08。是目前企划中唯一角色本身及真人Live均未使用过任何品牌型号Keytar的键盘手。
+```
 
-    Args:
-        prompt_name: 提示词模板名称
-        **kwargs: 提示词中需要替换的参数
+提取的关键词应该是：
+```
+丰川祥子，若叶睦，长崎爽世，千早爱音，Morfonica，Ave Mujica，CRYCHIC，月之森女子学园，羽丘女子学园
+```
 
-    Returns:
-        填充参数后的提示词
-    """
-    code_prompts = {
-        "text_cleaning": TEXT_CLEANING_PROMPT,
-        "summary": SUMMARY_PROMPT,
-        "rag": RAG_PROMPT,
-    }
+文本内容：
 
-    if prompt_name not in code_prompts:
-        raise ValueError(f"未找到名为 '{prompt_name}' 的提示词模板")
+{text}
 
-    prompt_template = code_prompts[prompt_name]
+关键词列表：
+"""
 
-    # 使用字符串format方法填充参数
-    return prompt_template.format(**kwargs)
+KEYWORDS_FILTERING_PROMPT = """
+以下是从文本中提取的所有关键词，请合并可能代表相同含义的关键词，并筛选出10-20个最重要的关键词，返回一个逗号分隔的列表：
+
+例如，对于以下关键词列表：
+```
+丰川祥子，若叶睦，长崎爽世，千早爱音，Morfonica，Ave Mujica，CRYCHIC，月之森女子学园，羽丘女子学园，若叶隆文，瑞穗，三角初华，高松灯，灯，祥子，椎名立希，春日影，爽世，初华，睦，立希
+```
+
+筛选后的关键词应该是：
+```
+丰川祥子，若叶睦，长崎爽世，千早爱音，三角初华，高松灯，椎名立希，春日影，Morfonica，Ave Mujica，CRYCHIC
+```
+
+以下是需要筛选的关键词：
+{keywords}
+
+筛选后最重要的关键词（使用逗号分割）：
+"""
+
+CONTENT_EXTRACTION_PROMPT = """
+请从以下文本中提取与关键词"{keyword}"相关的所有内容，仅返回直接相关的内容段落，不要添加任何解释：
+
+例如，对于关键词"机器学习"和以下文本：
+```
+人工智能是计算机科学的一个领域，它专注于创建能够模拟人类智能的系统。
+机器学习是人工智能的一个子领域，它使计算机能够通过经验自动改进。机器学习算法使用计算方法从数据中直接学习信息，而无需依赖预定义的方程式模型。
+深度学习是机器学习的一种特殊技术，它使用多层神经网络从大量数据中学习复杂模式。
+```
+
+提取的内容应该是：
+```
+机器学习是人工智能的一个子领域，它使计算机能够通过经验自动改进。机器学习算法使用计算方法从数据中直接学习信息，而无需依赖预定义的方程式模型。
+```
+
+{text}
+
+与"{keyword}"相关的内容：
+"""
+
+CONTENT_INTEGRATION_PROMPT = """
+以下是与关键词"{keyword}"相关的多个内容片段，请将它们整合为一个连贯、无重复的自然段，
+保留所有重要信息，避免重复内容，不要添加自己的解释：
+
+例如，对于关键词"神经网络"和以下内容片段：
+```
+神经网络是一种模仿人脑结构和功能的计算模型。它由多层神经元组成，能够处理复杂的模式识别任务。
+神经网络由输入层、隐藏层和输出层组成。每个神经元接收输入，应用激活函数，然后产生输出。
+神经网络通过反向传播算法进行训练，这一过程调整网络权重以最小化预测误差。
+```
+
+整合后的自然段应该是：
+```
+神经网络是一种模仿人脑结构和功能的计算模型，由输入层、隐藏层和输出层组成的多层神经元构成，能够处理复杂的模式识别任务。每个神经元接收输入，应用激活函数，然后产生输出。神经网络通过反向传播算法进行训练，这一过程调整网络权重以最小化预测误差。
+```
+
+{segments}
+
+整合后的自然段：
+"""
